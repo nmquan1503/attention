@@ -56,7 +56,10 @@ class MHA(nn.Module):
             causal_mask = torch.tril(
                 torch.ones(seq_len, seq_len, device=device, dtype=torch.bool)
             )
-            attn_mask = masks[:, None, None, :] & causal_mask[None, None, :, :]
+            if masks is not None:
+                attn_mask = masks[:, None, None, :] & causal_mask[None, None, :, :]
+            else:
+                attn_mask = causal_mask
         else:
             attn_mask = masks[:, None, None, :]
         attn_matrix = attn_matrix.masked_fill(~attn_mask, float("-inf"))
