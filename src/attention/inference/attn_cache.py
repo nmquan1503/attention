@@ -8,16 +8,12 @@ class AttnCache:
         self.mask = None  # (batch_size, seq_len)
         self.selective_F = None
         self.forget_cum_log = None
-        self.write_idx = 0
 
     def build(
         self,
         k_rot: torch.Tensor,
         v: torch.Tensor,
         mask: torch.Tensor,
-        buffer_size: int = 100,
-        selective_F=None,
-        forget_cum_log=None
     ):
         """
         Args:
@@ -27,55 +23,83 @@ class AttnCache:
         """
         batch_size, seq_len = mask.shape
 
-        self.k_rot = F.pad(k_rot, (0, 0, 0, buffer_size))
-        self.v = F.pad(v, (0, 0, 0, buffer_size))
-        self.mask = F.pad(mask, (0, buffer_size))
-        self.write_idx = seq_len
+        self.k_rot = k_rot
+        self.v = v
+        self.mask = mask
 
-        if selective_F is not None:
-            self.selective_F = F.pad(selective_F, (0, buffer_size))
+    def update(self, k_new, v_new):
+        k_new = k_new.unsqueeze(2)
+        v_new = v_new.unsqueeze(2)
+        m_new = torch.ones(k_new.shape[0], 1, dtype=torch.bool, device=k_new.device)
+        if self.k_rot is None:
+            self.k_rot, self.v, self.mask = k_new, v_new, m_new
         else:
-            self.selective_F = None
+            self.k_rot = torch.cat([self.k_rot, k_new], dim=2)
+            self.v = torch.cat([self.v, v_new], dim=2)
+            self.mask = torch.cat([self.mask, m_new], dim=1)
 
-        if forget_cum_log is not None:
-            self.forget_cum_log = F.pad(forget_cum_log, (0, buffer_size))
+    def build_selective(self, F_init, budget: int = None):
+        self.selective_F = F_init
+        if budget is not None and F_init.shape[1] > budget:
+            B, N = F_init.shape
+            if N > budget:
+                _, keep_idx = torch.topk(-F_init, budget, dim=1)
+                idx_k = keep_idx[:, None, :, None].expand(-1, self.k_rot.shape[1], -1, self.k_rot.shape[3])
+                self.k_rot = self.k_rot.gather(dim=2, index=idx_k)
+                idx_v = keep_idx[:, None, :, None].expand(-1, self.v.shape[1], -1, self.v.shape[3])
+                self.v = self.v.gather(dim=2, index=idx_v)
+                self.mask = self.mask.gather(dim=1, index=keep_idx)
+                self.selective_F = self.selective_F.gather(dim=1, index=keep_idx)
+    
+    def update_selective(self, S_new, budget=None):
+        L = self.seq_len
+        # Mở rộng selective_F cho khớp với số token hiện tại nếu cần
+        if self.selective_F.shape[1] < L:
+            pad = torch.zeros(self.selective_F.shape[0],
+                              L - self.selective_F.shape[1],
+                              device=self.selective_F.device,
+                              dtype=self.selective_F.dtype)
+            self.selective_F = torch.cat([self.selective_F, pad], dim=1)
+
+        # Cộng dồn mặt nạ từ token mới
+        self.selective_F[:, :S_new.shape[1]] += S_new
+
+        # Prune nếu vượt budget
+        if budget is not None and L > budget:
+            # Tìm token cũ (trừ token cuối) có F lớn nhất
+            F_vals = self.selective_F.clone()
+            F_vals[:, -1] = -float('inf')
+            evict_idx = F_vals.argmax(dim=1)  # (B,)
+
+            # Tạo chỉ số giữ lại (tất cả trừ token bị xoá)
+            keep_mask = torch.ones_like(self.mask, dtype=torch.bool)
+            keep_mask[torch.arange(L, device=F_vals.device).unsqueeze(0) == evict_idx.unsqueeze(1)] = False
+            keep_indices = keep_mask.nonzero(as_tuple=False)[:, 1].view(self.k_rot.shape[0], L-1)
+
+            # Cắt tất cả tensor theo keep_indices
+            idx_k = keep_indices[:, None, :, None].expand(-1, self.k_rot.shape[1], -1, self.k_rot.shape[3])
+            self.k_rot = self.k_rot.gather(dim=2, index=idx_k)
+
+            idx_v = keep_indices[:, None, :, None].expand(-1, self.v.shape[1], -1, self.v.shape[3])
+            self.v = self.v.gather(dim=2, index=idx_v)
+
+            self.mask = self.mask.gather(dim=1, index=keep_indices)
+            self.selective_F = self.selective_F.gather(dim=1, index=keep_indices)
+
+    def build_forget(self, cum_log_init):
+        """Gán forget_cum_log sau prefill."""
+        self.forget_cum_log = cum_log_init
+    
+    def update_forget(self, cum_val):
+        """
+        Thêm cum_val (B, num_heads) của token mới vào cuối forget_cum_log.
+        """
+        cum_val = cum_val.unsqueeze(2)  # (B, nh, 1)
+        if self.forget_cum_log is None:
+            self.forget_cum_log = cum_val
         else:
-            self.forget_cum_log = None
+            self.forget_cum_log = torch.cat([self.forget_cum_log, cum_val], dim=2)
 
-    def update(
-        self,
-        k_rot: torch.Tensor,
-        v: torch.Tensor,
-        buffer_size: int = 100
-    ):
-        """
-        Args:
-            k_rot: (batch_size, self.num_heads, self.head_dim)
-            v: (batch_size, self.num_heads, self.head_dim)
-        """
-        if self.write_idx >= self.k_rot.shape[2]:
-            self.build(self.k_rot, self.v, self.mask, buffer_size, selective_F=self.selective_F, forget_cum_log=self.forget_cum_log)
-        self.k_rot[:, :, self.write_idx, :] = k_rot
-        self.v[:, :, self.write_idx, :] = v
-        self.mask[:, self.write_idx] = True
-        self.write_idx += 1
-
-    def init_selective_F(self, F_init):
-        max_len = self.k_rot.shape[2]
-        self.selective_F = F.pad(F_init, (0, max_len - F_init.shape[1]))
-
-    def add_selective_mask(self, S_new, length):
-        self.selective_F[:, :length] += S_new
-
-    def get_selective_F(self, length):
-        return self.selective_F[:, :length]
-
-    def init_forget_cum_log(self, cum_log_init):
-        max_len = self.k_rot.shape[2]
-        self.forget_cum_log = F.pad(cum_log_init, (0, max_len - cum_log_init.shape[2]))
-
-    def set_forget_cum_log(self, cum_val, position):
-        self.forget_cum_log[:, :, position] = cum_val
-
-    def get_forget_cum_log(self, length):
-        return self.forget_cum_log[:, :, :length]
+    @property
+    def seq_len(self):
+        return self.k_rot.shape[2] if self.k_rot is not None else 0
