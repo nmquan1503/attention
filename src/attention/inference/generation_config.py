@@ -6,3 +6,4 @@ class GenerationConfig:
     eos_token_id: int
     pad_token_id: int
     max_new_tokens: int = 256
+    selective_budget: int = 32
