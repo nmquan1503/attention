@@ -6,7 +6,7 @@ from ..inference import AttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
 
 class MHA(nn.Module):
-    def __init__(self, dim, head_dim, is_causal=False):
+    def __init__(self, dim, head_dim, is_causal=False, selective=False, forget=False):
         super().__init__()
 
         assert dim % head_dim == 0
@@ -14,12 +14,17 @@ class MHA(nn.Module):
         self.num_heads = dim // head_dim
         self.head_dim = head_dim
         self.is_causal = is_causal
+        self.selective = selective
+        self.forget = forget
 
         self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
+
+        if forget:
+            self.forget_proj = nn.Linear(dim, self.num_heads)
 
     def forward(
         self, 
@@ -59,10 +64,40 @@ class MHA(nn.Module):
             if masks is not None:
                 attn_mask = masks[:, None, None, :] & causal_mask[None, None, :, :]
             else:
-                attn_mask = causal_mask
+                attn_mask = causal_mask.unsqueeze(0).unsqueeze(0)
         else:
-            attn_mask = masks[:, None, None, :]
+            if masks is not None:
+                attn_mask = masks[:, None, None, :]
+            else:
+                attn_mask = torch.ones(batch_size, 1, 1, seq_len, device=device, dtype=torch.bool)
+
         attn_matrix = attn_matrix.masked_fill(~attn_mask, float("-inf"))
+        
+        F_init = None
+        if self.selective and self.is_causal:
+            S = attn_matrix[:, 0]
+            S = torch.relu(S)
+            S[:, :, 0] = 0
+            diag_mask = torch.eye(seq_len, device=device, dtype=torch.bool).unsqueeze(0)
+            S = S.masked_fill(diag_mask, 0)
+            S = torch.roll(S, shifts=1, dims=-2)
+            S[:, 0, :] = 0
+            F_mat = torch.cumsum(S, dim=-2)
+            attn_matrix = attn_matrix - F_mat.unsqueeze(1)
+            F_init = F_mat[:, -1, :] 
+        
+        forget_cum_log = None
+        if self.forget and self.is_causal:
+            f = torch.sigmoid(self.forget_proj(hidden_states))    # (B, N, num_heads)
+            f = f.transpose(1, 2)                                 # (B, num_heads, N)
+            log_f = torch.log(f + 1e-8)
+            forget_cum_log = torch.cumsum(log_f, dim=-1)          # (B, h, N)
+
+            # D[i,j] = cum_log_f[i] - cum_log_f[j]  (i >= j)
+            D = forget_cum_log[:, :, :, None] - forget_cum_log[:, :, None, :]  # (B, h, N, N)
+            D = D.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+            attn_matrix = attn_matrix + D
+        
         attn_weights = F.softmax(attn_matrix, dim=-1)
 
         out = attn_weights @ v
@@ -70,7 +105,11 @@ class MHA(nn.Module):
         hidden_states = self.out_proj(out)
         
         if is_infer and self.is_causal:
-            cache.build(k_rot, v, masks)
+            cache_mask = masks if masks is not None else torch.ones(batch_size, seq_len, device=device, dtype=torch.bool)
+            if self.selective:
+                cache.init_selective_F(F_init)
+            if self.forget:
+                cache.init_forget_cum_log(forget_cum_log)
         
         return hidden_states
 
@@ -103,13 +142,41 @@ class MHA(nn.Module):
 
         q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
 
+        if self.forget:
+            f_new = torch.sigmoid(self.forget_proj(hidden_states))   # (B, num_heads)
+            log_f_new = torch.log(f_new + 1e-8)
+            # Lấy cum_log của token trước đó (dùng vị trí write_idx - 1 nếu có)
+            if cache.write_idx > 0:
+                prev_cum = cache.forget_cum_log[:, :, cache.write_idx - 1]  # (B, h)
+            else:
+                prev_cum = torch.zeros(batch_size, self.num_heads, device=device)
+            cum_new = prev_cum + log_f_new 
+
         cache.update(k_rot, v)
+        L = cache.write_idx
+
+        if self.forget:
+            cache.set_forget_cum_log(cum_new, L - 1)
 
         scale = self.head_dim ** 0.5
         attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot[:, :, :cache.write_idx, :].transpose(-2, -1)) / scale
-
+        
+        if self.selective and self.is_causal:
+            S_new = attn_matrix[:, 0, 0, :]
+            S_new = torch.relu(S_new)
+            S_new[:, 0] = 0
+            S_new[:, L - 1] = 0
+            F_prev = cache.get_selective_F(L)
+            attn_matrix = attn_matrix - F_prev.unsqueeze(1).unsqueeze(2)
+            cache.add_selective_mask(S_new, L)
+        
+        if self.forget and self.is_causal:
+            cum_log_f = cache.get_forget_cum_log(L)       # (B, num_heads, L)
+            D_current = cum_log_f[:, :, -1:] - cum_log_f   # (B, num_heads, L)
+            attn_matrix = attn_matrix + D_current.unsqueeze(2)
+        
         attn_matrix = attn_matrix.masked_fill(
-            cache.mask[:, None, None, :cache.write_idx] == 0,
+            ~cache.mask[:, None, None, :cache.write_idx],
             float("-inf")
         )
 

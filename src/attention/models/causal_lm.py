@@ -11,6 +11,8 @@ class CausalLMConfig:
     model_dim: int = 512
     head_dim: int = 64
     num_layers: int = 4
+    selective: bool = False
+    forget: bool = False
     dropout_rate: float = 0.15
     device: str | None = "cuda"
 
@@ -28,6 +30,8 @@ class CausalLM(nn.Module):
             CausalBlock(
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
+                selective=cfg.selective,
+                forget=cfg.forget,
                 dropout_rate=cfg.dropout_rate,
             )
             for layer_idx in range(cfg.num_layers)
