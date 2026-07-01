@@ -182,7 +182,7 @@ class MHA(nn.Module):
         )
 
         attn_matrix = F.softmax(attn_matrix, dim=-1)
-        out = attn_matrix @ cache.v[:, :, :cache.write_idx, :]
+        out = attn_matrix @ cache.v
         out = out.squeeze(2).view(batch_size, self.dim)
 
         return self.out_proj(out)
