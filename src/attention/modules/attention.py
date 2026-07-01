@@ -164,6 +164,11 @@ class MHA(nn.Module):
         attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot.transpose(-2, -1)) / scale
         
         if self.selective and self.is_causal:
+            pad = torch.zeros(cache.selective_F.shape[0],
+                          L - cache.selective_F.shape[1],
+                          device=cache.selective_F.device,
+                          dtype=cache.selective_F.dtype)
+            cache.selective_F = torch.cat([cache.selective_F, pad], dim=1)
             S_new = attn_matrix[:, 0, 0, :]
             S_new = torch.relu(S_new)
             S_new[:, 0] = 0
