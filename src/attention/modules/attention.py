@@ -177,7 +177,7 @@ class MHA(nn.Module):
             attn_matrix = attn_matrix + D_current.unsqueeze(2)
         
         attn_matrix = attn_matrix.masked_fill(
-            ~cache.mask[:, None, None, :cache.write_idx],
+            ~cache.mask[:, None, None, :],
             float("-inf")
         )
 
