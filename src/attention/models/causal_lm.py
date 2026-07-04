@@ -28,6 +28,7 @@ class CausalLM(nn.Module):
         self.embedding = nn.Embedding(cfg.vocab_size, cfg.model_dim)
         self.layers = nn.ModuleList([
             CausalBlock(
+                layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
                 selective=cfg.selective,
@@ -45,6 +46,8 @@ class CausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         masks: torch.Tensor | None = None,
+        bos_idx: torch.Tensor | None = None,
+        prune_budget=None,
         cache: list[CausalBlockCache] | None = None
     ):
         """
@@ -60,6 +63,8 @@ class CausalLM(nn.Module):
             hidden_states = layer(
                 hidden_states=hidden_states, 
                 masks=masks, 
+                bos_idx=bos_idx,
+                prune_budget=prune_budget[layer_idx] if layer_idx is not None else None,
                 cache=cache[layer_idx] if cache is not None else None
             )
         hidden_states = self.norm(hidden_states)
@@ -102,10 +107,11 @@ class CausalLM(nn.Module):
         cache = [CausalBlockCache() for _ in range(self.cfg.num_layers)]
         masks = input_ids != gen_cfg.pad_token_id
         lengths = masks.sum(dim=1)
+        bos_idx = lengths.clone() - 1
         state = InferenceState(lengths)
 
         last_indices = lengths - 1
-        logits = self.forward(input_ids, masks, cache)
+        logits = self.forward(input_ids, masks, bos_idx, gen_cfg.selective_budget, cache)
         logits = logits[torch.arange(batch_size, device=device), last_indices]
         
         seq_ids = torch.full(

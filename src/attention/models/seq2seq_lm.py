@@ -13,8 +13,6 @@ class Seq2SeqLMConfig:
     head_dim: int = 64
     num_layers: int = 4
     dropout_rate: float = 0.15
-    selective: bool = True
-    forget: bool = True
     device: str | None = "cuda"
 
 class Seq2SeqLM(nn.Module):
@@ -44,8 +42,6 @@ class Seq2SeqLM(nn.Module):
                 layer_idx=layer_idx,
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
-                selective=cfg.selective,
-                forget=cfg.forget,
                 dropout_rate=cfg.dropout_rate,
                 device=cfg.device
             )

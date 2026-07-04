@@ -10,19 +10,19 @@ from ..inference import CrossBlockCache, InferenceState, GenerationConfig
 class CrossBlock(nn.Module):
     def __init__(
         self,
+        layer_idx,
         model_dim: int = 512,
         head_dim: int = 64,
-        selective: bool = False,
-        forget: bool = False,
         dropout_rate: float = 0.15,
     ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         self.norm1 = RMSNorm(model_dim)
         self.norm2 = RMSNorm(model_dim)
         self.norm3 = RMSNorm(model_dim)
-        self.self_attn = MHA(model_dim, head_dim, is_causal=True, selective=selective, forget=forget)
-        self.cross_attn = CrossMHA(model_dim, head_dim)
+        self.self_attn = MHA(layer_idx, model_dim, head_dim, is_causal=True)
+        self.cross_attn = CrossMHA(layer_idx, model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 

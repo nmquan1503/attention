@@ -8,15 +8,17 @@ from .rms_norm import RMSNorm
 class BiBlock(nn.Module):
     def __init__(
         self,
+        layer_idx,
         model_dim: int = 512,
         head_dim: int = 64,
         dropout_rate: float = 0.15,
     ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         self.norm1 = RMSNorm(model_dim)
         self.norm2 = RMSNorm(model_dim)
-        self.mha = MHA(model_dim, head_dim)
+        self.mha = MHA(layer_idx, model_dim, head_dim)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 

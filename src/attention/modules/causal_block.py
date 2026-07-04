@@ -9,6 +9,7 @@ from ..inference import CausalBlockCache, InferenceState, GenerationConfig
 class CausalBlock(nn.Module):
     def __init__(
         self,
+        layer_idx,
         model_dim: int = 512,
         head_dim: int = 64,
         selective: bool = False,
@@ -16,10 +17,11 @@ class CausalBlock(nn.Module):
         dropout_rate: float = 0.15,
     ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         self.norm1 = RMSNorm(model_dim)
         self.norm2 = RMSNorm(model_dim)
-        self.mha = MHA(model_dim, head_dim, is_causal=True, selective=selective, forget=forget)
+        self.mha = MHA(layer_idx, model_dim, head_dim, is_causal=True, selective=selective, forget=forget)
         self.ffn = SwiGLU(model_dim, model_dim * 4)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -27,6 +29,8 @@ class CausalBlock(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         masks: torch.Tensor | None = None,
+        bos_idx: torch.Tensor | None = None,
+        prune_budget=None,
         cache: CausalBlockCache | None = None
     ):
         """
@@ -43,6 +47,8 @@ class CausalBlock(nn.Module):
         hidden_states = self.mha(
             hidden_states=hidden_states,
             masks=masks, 
+            bos_idx=bos_idx,
+            prune_budget=prune_budget,
             cache=cache.attn_cache if cache is not None else None
         )
         hidden_states = res + self.dropout(hidden_states)

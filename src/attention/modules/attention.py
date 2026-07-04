@@ -6,8 +6,17 @@ from ..inference import AttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
 
 class MHA(nn.Module):
-    def __init__(self, dim, head_dim, is_causal=False, selective=False, forget=False):
+    def __init__(
+        self,
+        layer_idx, 
+        dim, 
+        head_dim, 
+        is_causal=False, 
+        selective=False, 
+        forget=False
+    ):
         super().__init__()
+        self.layer_idx = layer_idx
 
         assert dim % head_dim == 0
         self.dim = dim
@@ -30,6 +39,7 @@ class MHA(nn.Module):
         self, 
         hidden_states: torch.Tensor, 
         masks: torch.Tensor | None = None, 
+        bos_idx: torch.Tensor | None = None,
         cache: AttnCache | None = None,
         prune_budget: int | None = None
     ):
@@ -78,23 +88,32 @@ class MHA(nn.Module):
         if self.selective and self.is_causal:
             S = attn_matrix[:, 0]
             S = torch.relu(S)
-            S[:, :, 0] = 0
+            if bos_idx is not None:
+                bos_mask = torch.zeros_like(S, dtype=torch.bool)
+                bos_mask[torch.arange(batch_size, device=device), :, bos_idx] = True
+                S = S.masked_fill(bos_mask, 0)
+            else:
+                S[:, :, 0] = 0
             diag_mask = torch.eye(seq_len, device=device, dtype=torch.bool).unsqueeze(0)
             S = S.masked_fill(diag_mask, 0)
+            S_orig = S.clone()
             S = torch.roll(S, shifts=1, dims=-2)
             S[:, 0, :] = 0
             F_mat = torch.cumsum(S, dim=-2)
             attn_matrix = attn_matrix - F_mat.unsqueeze(1)
-            F_init = F_mat[:, -1, :] 
+            F_init = F_mat[:, -1, :] + S_orig[:, -1, :]
+            if masks is not None:
+                F_init = F_init.masked_fill(~masks, float("inf"))
         
         forget_cum_log = None
         if self.forget and self.is_causal:
             f = torch.sigmoid(self.forget_proj(hidden_states))    # (B, N, num_heads)
             f = f.transpose(1, 2)                                 # (B, num_heads, N)
             log_f = torch.log(f + 1e-8)
+            if masks is not None:
+                log_f = log_f.masked_fill(~masks.unsqueeze(1), 0.0)
             forget_cum_log = torch.cumsum(log_f, dim=-1)          # (B, h, N)
 
-            # D[i,j] = cum_log_f[i] - cum_log_f[j]  (i >= j)
             D = forget_cum_log[:, :, :, None] - forget_cum_log[:, :, None, :]  # (B, h, N, N)
             D = D.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
             attn_matrix = attn_matrix + D
@@ -109,7 +128,7 @@ class MHA(nn.Module):
             cache_mask = masks if masks is not None else torch.ones(batch_size, seq_len, device=device, dtype=torch.bool)
             cache.build(k_rot, v, cache_mask)
             if self.selective:
-                cache.build_selective(F_init, prune_budget)
+                cache.build_selective(F_init, bos_idx, prune_budget)
             if self.forget:
                 cache.build_forget(forget_cum_log)
         
@@ -147,7 +166,6 @@ class MHA(nn.Module):
         if self.forget:
             f_new = torch.sigmoid(self.forget_proj(hidden_states))   # (B, num_heads)
             log_f_new = torch.log(f_new + 1e-8)
-            # Lấy cum_log của token trước đó (dùng vị trí write_idx - 1 nếu có)
             if cache.forget_cum_log is not None:
                 prev_cum = cache.forget_cum_log[:, :, -1]  # (B, num_heads)
             else:
@@ -164,17 +182,23 @@ class MHA(nn.Module):
         attn_matrix = (q_rot.unsqueeze(2) @ cache.k_rot.transpose(-2, -1)) / scale
         
         if self.selective and self.is_causal:
-            pad = torch.zeros(cache.selective_F.shape[0],
-                          L - cache.selective_F.shape[1],
-                          device=cache.selective_F.device,
-                          dtype=cache.selective_F.dtype)
-            cache.selective_F = torch.cat([cache.selective_F, pad], dim=1)
+            F_cur = cache.selective_F
+            if F_cur.shape[1] < L:
+                pad = torch.zeros(F_cur.shape[0], L - F_cur.shape[1], 
+                                  device=device, dtype=F_cur.dtype)
+                F_cur = torch.cat([F_cur, pad], dim=1)
             S_new = attn_matrix[:, 0, 0, :]
             S_new = torch.relu(S_new)
-            S_new[:, 0] = 0
+
+            if cache.bos_idx is not None:
+                valid = cache.bos_idx >= 0
+                if valid.any():
+                    idx_bos = cache.bos_idx[valid]
+                    batch_idx = torch.where(valid)[0]
+                    S_new[batch_idx, idx_bos] = 0
+
             S_new[:, -1] = 0
-            attn_matrix = attn_matrix - cache.selective_F.unsqueeze(1).unsqueeze(2)
-            cache.update_selective(S_new, budget=gen_cfg.selective_budget)
+            attn_matrix = attn_matrix - F_cur.unsqueeze(1).unsqueeze(2)
         
         if self.forget and self.is_causal:
             cum_log_f = cache.forget_cum_log           # (B, nh, L)
@@ -189,5 +213,11 @@ class MHA(nn.Module):
         attn_matrix = F.softmax(attn_matrix, dim=-1)
         out = attn_matrix @ cache.v
         out = out.squeeze(2).view(batch_size, self.dim)
+
+        if self.selective and self.is_causal:
+            cache.update_selective(
+                S_new, 
+                budget=gen_cfg.selective_budget[self.layer_idx] if gen_cfg.selective_budget is not None else None
+            )
 
         return self.out_proj(out)
