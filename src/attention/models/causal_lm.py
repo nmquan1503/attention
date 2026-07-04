@@ -64,7 +64,7 @@ class CausalLM(nn.Module):
                 hidden_states=hidden_states, 
                 masks=masks, 
                 bos_idx=bos_idx,
-                prune_budget=prune_budget[layer_idx] if layer_idx is not None else None,
+                prune_budget=prune_budget[layer_idx] if prune_budget is not None else None,
                 cache=cache[layer_idx] if cache is not None else None
             )
         hidden_states = self.norm(hidden_states)
