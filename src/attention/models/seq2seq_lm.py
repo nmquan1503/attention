@@ -72,7 +72,7 @@ class Seq2SeqLM(nn.Module):
         enc_hidden_states = self.embedding(input_ids)
         enc_mask = torch.arange(enc_seq_len, device=lengths.device)[None, :] < lengths[:, None]
         for layer_idx, layer in enumerate(self.encoder_layers):
-            enc_hidden_states, _ = layer(
+            enc_hidden_states = layer(
                 hidden_states=enc_hidden_states,
                 masks=enc_mask
             )
