@@ -33,7 +33,6 @@ class Seq2SeqLM(nn.Module):
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
                 dropout_rate=cfg.dropout_rate,
-                device=cfg.device
             )
             for layer_idx in range(cfg.num_layers)
         ])
@@ -43,7 +42,6 @@ class Seq2SeqLM(nn.Module):
                 model_dim=cfg.model_dim,
                 head_dim=cfg.head_dim,
                 dropout_rate=cfg.dropout_rate,
-                device=cfg.device
             )
             for layer_idx in range(cfg.num_layers)
         ])
