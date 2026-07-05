@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from ..inference import CrossAttnCache, InferenceState, GenerationConfig
 
 class CrossMHA(nn.Module):
-    def __init__(layer_idx, self, dim, head_dim):
+    def __init__(self, layer_idx, dim, head_dim):
         super().__init__()
         self.layer_idx = layer_idx
 
