@@ -126,7 +126,6 @@ def traditional_decode_kernel(
         v_new = tl.load(v_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
         tl.store(k_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, k_new)
         tl.store(v_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, v_new)
-        tl.store(write_pos_ptr + seq_id, current_end + 1)
 
         chunk_end = current_end + 1
         chunk_len = chunk_end - (cache_start + chunk_id * CHUNK_SIZE)
@@ -214,3 +213,4 @@ def reduce_kernel_traditional(
 
     out = acc / l
     tl.store(out_ptr + seq_id * out_t_stride + head_id * out_h_stride + offs_d * out_d_stride, out)
+    tl.store(write_pos_ptr + seq_id, current_end + 1)
