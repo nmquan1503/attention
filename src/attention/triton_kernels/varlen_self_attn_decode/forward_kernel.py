@@ -114,31 +114,34 @@ def traditional_decode_kernel(
     current_end = tl.load(write_pos_ptr + seq_id)
     current_len = current_end - cache_start
 
-    num_chunks_before = tl.cdiv(current_len, CHUNK_SIZE)
-    is_last_chunk = (chunk_id == num_chunks_before - 1)
+    chunk_start = cache_start + chunk_id * CHUNK_SIZE
+    chunk_end = tl.minimum(chunk_start + CHUNK_SIZE, current_end)
+    chunk_len = chunk_end - chunk_start
+
+    if chunk_len < 0:
+        return
 
     offs_d = tl.arange(0, D)
     q = tl.load(q_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
 
-    if is_last_chunk and current_len % CHUNK_SIZE != 0:
-        new_pos = current_end
+    if chunk_len == CHUNK_SIZE:
+        acc = tl.zeros((D,), dtype=tl.float32)
+        m = tl.full((), -float("inf"), dtype=tl.float32)
+        l = tl.full((), 0.0, dtype=tl.float32)
+    else:
         k_new = tl.load(k_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
         v_new = tl.load(v_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
+
+        new_pos = current_end
         tl.store(k_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, k_new)
         tl.store(v_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, v_new)
 
+        m = tl.reshape(tl.dot(q, k_new), ()).to(tl.float32) * SCALE
+        l = 1.0
+        acc = v_new
+
         chunk_end = current_end + 1
         chunk_len = chunk_end - (cache_start + chunk_id * CHUNK_SIZE)
-    else:
-        chunk_start = cache_start + chunk_id * CHUNK_SIZE
-        chunk_end = tl.minimum(chunk_start + CHUNK_SIZE, cache_start + current_len)
-        chunk_len = chunk_end - chunk_start
-        if chunk_len <= 0:
-            return
-
-    acc = tl.zeros((D,), dtype=tl.float32)
-    m = tl.full((), -float("inf"), dtype=tl.float32)
-    l = tl.full((), 0.0, dtype=tl.float32)
 
     offs_k_base = tl.arange(0, BLOCK_K)
     for block_start in range(0, chunk_len, BLOCK_K):
@@ -193,7 +196,7 @@ def reduce_kernel_traditional(
 
     cache_start = tl.load(cu_seqlens_cache_ptr + seq_id)
     current_end = tl.load(write_pos_ptr + seq_id)
-    cache_len = current_end - cache_start
+    cache_len = current_end - cache_start + 1   # token mới đã được ghi
     num_chunks = tl.cdiv(cache_len, CHUNK_SIZE)
 
     offs_d = tl.arange(0, D)
