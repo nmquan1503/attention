@@ -212,4 +212,5 @@ def reduce_kernel_traditional(
 
     out = acc / l
     tl.store(out_ptr + seq_id * out_t_stride + head_id * out_h_stride + offs_d * out_d_stride, out)
-    tl.store(write_pos_ptr + seq_id, current_end + 1)
+    if head_id == 0:
+        tl.store(write_pos_ptr + seq_id, current_end + 1)
