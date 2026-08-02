@@ -10,10 +10,10 @@ from .forward_kernel import (
 
 
 def pad_buffer(
-    k_cache: torch.Tensor,
+    k_cache: torch.Tensor,            # (total_slots, num_heads, dim)
     v_cache: torch.Tensor,
-    cu_seqlens_cache: torch.Tensor,
-    write_pos: torch.Tensor,
+    cu_seqlens_cache: torch.Tensor,   # (num_seqs + 1,)
+    write_pos: torch.Tensor,          # (num_seqs,)
     buffer_size: int,
 ):
     """
@@ -32,16 +32,6 @@ def pad_buffer(
     num_seqs = cu_seqlens_cache.numel() - 1
     _, num_heads, dim = k_cache.shape
     lengths = write_pos - cu_seqlens_cache[:-1]
-
-    if not torch.any(lengths > 0):
-        new_lengths = lengths + buffer_size
-        new_cu_seqlens_cache = torch.zeros(num_seqs + 1, dtype=torch.int32, device=k_cache.device)
-        new_cu_seqlens_cache[1:] = torch.cumsum(new_lengths, dim=0)
-        new_total_slots = new_cu_seqlens_cache[-1].item()
-        k_out = torch.empty(new_total_slots, num_heads, dim, device=k_cache.device, dtype=k_cache.dtype)
-        v_out = torch.empty(new_total_slots, num_heads, dim, device=v_cache.device, dtype=v_cache.dtype)
-        new_write_pos = new_cu_seqlens_cache[:-1].clone()
-        return k_out, v_out, new_cu_seqlens_cache, new_write_pos
 
     avg_len = math.ceil(lengths[lengths > 0].float().mean().item())
     block_t = min(256, triton.next_power_of_2(avg_len))
