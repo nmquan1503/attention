@@ -9,6 +9,11 @@ class AttnCache:
         self.forget_cum_log = None # (B, num_heads, L)
         self.bos_idx = None        # (B,) LongTensor, vị trí của <bos> trong cache (nếu có)
 
+        self.k_fast = None
+        self.v_fast = None
+        self.cu_seqlens = None
+        self.write_pos = None
+
     @property
     def seq_len(self):
         return self.k_rot.shape[2] if self.k_rot is not None else 0
@@ -17,6 +22,18 @@ class AttnCache:
         self.k_rot = k_rot
         self.v = v
         self.mask = mask
+
+    def build_fast(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        write_pos: torch.Tensor,
+    ):
+        self.k_fast = k
+        self.v_fast = v
+        self.cu_seqlens = cu_seqlens
+        self.write_pos = write_pos
 
     def update(self, k_new, v_new):
         k_new = k_new.unsqueeze(2)   # (B, nh, 1, hd)

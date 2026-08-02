@@ -4,6 +4,13 @@ import torch.nn.functional as F
 
 from ..inference import AttnCache, InferenceState, GenerationConfig
 from .rope import RoPE
+from ..triton_kernels import (
+    varlen_traditional_attention_forward,
+    varlen_traditional_attention_pad_buffer,
+    varlen_traditional_attention_decode,
+    varlen_traditional_attention_unpack_seqs,
+    varlen_traditional_attention_pack_seqs
+)
 
 class MHA(nn.Module):
     def __init__(
@@ -13,7 +20,8 @@ class MHA(nn.Module):
         head_dim, 
         is_causal=False, 
         selective=False, 
-        forget=False
+        forget=False,
+        fast: bool = True,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -25,6 +33,7 @@ class MHA(nn.Module):
         self.is_causal = is_causal
         self.selective = selective
         self.forget = forget
+        self.fast = fast
 
         self.rope = RoPE(self.head_dim)
         self.q_proj = nn.Linear(dim, dim)
@@ -51,9 +60,36 @@ class MHA(nn.Module):
         Returns:
             hidden_states: (batch_size, seq_len, dim)
         """
-        batch_size, seq_len, _ = hidden_states.shape
+        batch_size, seq_len, dim = hidden_states.shape
         device = hidden_states.device
         is_infer = cache is not None
+
+        if is_infer and self.fast:
+            lengths = masks.sum(dim=-1, dtype=torch.int32)
+            hidden_states, cu_seqlens = varlen_traditional_attention_pack_seqs(hidden_states, lengths)
+            q = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            k = self.k_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            v = self.v_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+
+            position_ids = torch.arange(q.shape[0], device=q.device)
+            position_ids -= torch.repeat_interleave(cu_seqlens[:-1], lengths)
+
+            q, k = self.rope(q, k, position_ids, mode="pos")
+
+            hidden_states = varlen_traditional_attention_forward(
+                q, k, v,
+                cu_seqlens, seq_len, self.head_dim ** (-0.5), self.is_causal
+            )
+
+            hidden_states = hidden_states.view(-1, dim)
+            hidden_states = self.out_proj(hidden_states)
+
+            hidden_states = varlen_traditional_attention_unpack_seqs(hidden_states, cu_seqlens)
+            write_pos = cu_seqlens[1:].clone().contiguous()
+
+            cache.build_fast(k, v, cu_seqlens, write_pos)
+
+            return hidden_states
  
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -150,8 +186,36 @@ class MHA(nn.Module):
             hidden_states: (batch_size, model_dim)
         """
 
-        batch_size, _ = hidden_states.shape
+        batch_size, dim = hidden_states.shape
         device = hidden_states.device
+
+        if self.fast:
+            k_cache, v_cache, cu_seqlens, write_pos = varlen_traditional_attention_pad_buffer(
+                cache.k_fast,
+                cache.v_fast,
+                cache.cu_seqlens,
+                cache.write_pos,
+                buffer_size=1
+            )
+
+            q = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            k = self.k_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            v = self.v_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+
+            q_rot, k_rot = self.rope(q, k, state.lengths, mode="pos")
+
+            hidden_states, k_cache, v_cache, write_pos = varlen_traditional_attention_decode(
+                q_rot, k_rot, v, self.head_dim ** (-0.5),
+                k_cache, v_cache, cu_seqlens, write_pos
+            )
+
+            hidden_states = hidden_states.view(-1, dim)
+            hidden_states = self.out_proj(hidden_states)
+
+            cache.build_fast(k_cache, v_cache, cu_seqlens, write_pos)
+    
+            return hidden_states
+
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
