@@ -47,7 +47,8 @@ def pad_buffer_kernel(
     block_in_seq = token_block_id - tl.load(pad_offsets_ptr + seq_id)
 
     old_start = tl.load(cu_seqlens_cache_ptr + seq_id)
-    length = tl.load(write_pos_ptr + seq_id)
+    old_end = tl.load(write_pos_ptr + seq_id)
+    length = old_end - old_start
     new_start = tl.load(new_cu_seqlens_cache_ptr + seq_id)
 
     offs_t = block_in_seq * BLOCK_T + tl.arange(0, BLOCK_T)
@@ -110,7 +111,8 @@ def traditional_decode_kernel(
     group_id = seq_id * NUM_HEADS + head_id
 
     cache_start = tl.load(cu_seqlens_cache_ptr + seq_id)
-    current_len = tl.load(write_pos_ptr + seq_id)
+    current_end = tl.load(write_pos_ptr + seq_id)
+    current_len = current_end - cache_start
 
     num_chunks_before = tl.cdiv(current_len, CHUNK_SIZE)
     is_last_chunk = (chunk_id == num_chunks_before - 1)
@@ -119,13 +121,14 @@ def traditional_decode_kernel(
     q = tl.load(q_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
 
     if is_last_chunk:
-        new_pos = cache_start + current_len
+        new_pos = current_end
         k_new = tl.load(k_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
         v_new = tl.load(v_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
         tl.store(k_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, k_new)
         tl.store(v_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, v_new)
-        tl.store(write_pos_ptr + seq_id, current_len + 1)
-        chunk_end = cache_start + current_len + 1
+        tl.store(write_pos_ptr + seq_id, current_end + 1)
+
+        chunk_end = current_end + 1
         chunk_len = chunk_end - (cache_start + chunk_id * CHUNK_SIZE)
     else:
         chunk_start = cache_start + chunk_id * CHUNK_SIZE
@@ -175,6 +178,7 @@ def traditional_decode_kernel(
 def reduce_kernel_traditional(
     mid_o_ptr,                  # (num_seqs * num_heads, num_chunks, dim)
     mid_logsumexp_ptr,          # (num_seqs * num_heads, num_chunks)
+    cu_seqlens_cache_ptr,       # (num_seqs + 1,)
     write_pos_ptr,              # (num_seqs,)
     out_ptr,                    # (num_seqs, num_heads, dim)
     mid_o_g_stride, mid_o_c_stride, mid_o_d_stride,
@@ -188,7 +192,9 @@ def reduce_kernel_traditional(
     head_id = tl.program_id(1)
     group_id = seq_id * NUM_HEADS + head_id
 
-    cache_len = tl.load(write_pos_ptr + seq_id)
+    cache_start = tl.load(cu_seqlens_cache_ptr + seq_id)
+    current_end = tl.load(write_pos_ptr + seq_id)
+    cache_len = current_end - cache_start
     num_chunks = tl.cdiv(cache_len, CHUNK_SIZE)
 
     offs_d = tl.arange(0, D)

@@ -31,7 +31,7 @@ def pad_buffer(
     """
     num_seqs = cu_seqlens_cache.numel() - 1
     _, num_heads, dim = k_cache.shape
-    lengths = write_pos
+    lengths = write_pos - cu_seqlens_cache[:-1]
 
     if not torch.any(lengths > 0):
         new_lengths = lengths + buffer_size
@@ -40,7 +40,8 @@ def pad_buffer(
         new_total_slots = new_cu_seqlens_cache[-1].item()
         k_out = torch.empty(new_total_slots, num_heads, dim, device=k_cache.device, dtype=k_cache.dtype)
         v_out = torch.empty(new_total_slots, num_heads, dim, device=v_cache.device, dtype=v_cache.dtype)
-        return k_out, v_out, new_cu_seqlens_cache, write_pos
+        new_write_pos = new_cu_seqlens_cache[:-1].clone()
+        return k_out, v_out, new_cu_seqlens_cache, new_write_pos
 
     avg_len = math.ceil(lengths[lengths > 0].float().mean().item())
     block_t = min(256, triton.next_power_of_2(avg_len))
@@ -54,6 +55,7 @@ def pad_buffer(
     new_cu_seqlens_cache = torch.zeros(num_seqs + 1, dtype=torch.int32, device=k_cache.device)
     new_cu_seqlens_cache[1:] = torch.cumsum(new_lengths, dim=0)
     new_total_slots = new_cu_seqlens_cache[-1].item()
+    new_write_pos = new_cu_seqlens_cache[:-1] + lengths
 
     k_out = torch.empty(new_total_slots, num_heads, dim, device=k_cache.device, dtype=k_cache.dtype)
     v_out = torch.empty(new_total_slots, num_heads, dim, device=v_cache.device, dtype=v_cache.dtype)
@@ -77,7 +79,7 @@ def pad_buffer(
         BLOCK_T=block_t,
     )
 
-    return k_out, v_out, new_cu_seqlens_cache, write_pos
+    return k_out, v_out, new_cu_seqlens_cache, new_write_pos
 
 
 def varlen_traditional_attention_decode(
@@ -89,7 +91,7 @@ def varlen_traditional_attention_decode(
     v_cache: torch.Tensor,
     cu_seqlens_cache: torch.Tensor,
     write_pos: torch.Tensor,
-) -> torch.Tensor:
+):
     """
     Args:
         q: (num_seqs, num_heads, dim)
@@ -109,7 +111,8 @@ def varlen_traditional_attention_decode(
     num_seqs, num_heads, dim = q.shape
     num_groups = num_seqs * num_heads
 
-    new_lengths = write_pos + 1
+    old_lengths = write_pos - cu_seqlens_cache[:-1]
+    new_lengths = old_lengths + 1
     max_len = new_lengths.max().item()
 
     CHUNK_SIZE_MIN = 16
@@ -154,7 +157,7 @@ def varlen_traditional_attention_decode(
     out = torch.empty_like(v)
     reduce_kernel_traditional[(num_seqs, num_heads)](
         mid_o, mid_logsumexp,
-        write_pos,
+        cu_seqlens_cache, write_pos,
         out,
         *mid_o.stride(),
         *mid_logsumexp.stride(),
