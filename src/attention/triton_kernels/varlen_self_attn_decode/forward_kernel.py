@@ -122,59 +122,48 @@ def traditional_decode_kernel(
 
     offs_d = tl.arange(0, D)
 
-    q = tl.load(
-        q_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d[None, :] * q_d_stride
-    )
+    q = tl.load(q_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d[None, :] * q_d_stride)
 
     if chunk_len == CHUNK_SIZE:
         acc = tl.zeros((D,), dtype=tl.float32)
         m = tl.full((), -float("inf"), dtype=tl.float32)
         l = tl.full((), 0.0, dtype=tl.float32)
     else:
-        k_new = tl.load(
-            k_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d[:, None] * q_d_stride
-        )
-        v_new = tl.load(
-            v_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride
-        )
+        k_new = tl.load(k_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d[:, None] * q_d_stride)
+        v_new = tl.load(v_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
 
-        new_pos = current_end
-        tl.store(k_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride,
+        tl.store(k_cache_ptr + current_end * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride,
                  tl.reshape(k_new, (D,)))
-        tl.store(v_cache_ptr + new_pos * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride, v_new)
+        tl.store(v_cache_ptr + current_end * k_cache_t_stride + head_id * k_cache_h_stride + offs_d * k_cache_d_stride,
+                 v_new)
 
         m = tl.reshape(tl.dot(q, k_new), ()).to(tl.float32) * SCALE
         l = 1.0
         acc = v_new
 
-        chunk_end = current_end + 1
-        chunk_len = chunk_end - (cache_start + chunk_id * CHUNK_SIZE)
-
     offs_k_base = tl.arange(0, BLOCK_K)
     for block_start in range(0, chunk_len, BLOCK_K):
-        offs_k = (cache_start + chunk_id * CHUNK_SIZE + block_start) + offs_k_base
+        offs_k = chunk_start + block_start + offs_k_base
         mask_k = offs_k < chunk_end
 
-        k_loaded = tl.load(
-            k_cache_ptr + offs_k[:, None] * k_cache_t_stride
-                         + head_id * k_cache_h_stride
-                         + offs_d[None, :] * k_cache_d_stride,
-            mask=mask_k[:, None], other=0.0,
-        )
+        k_loaded = tl.load(k_cache_ptr + offs_k[:, None] * k_cache_t_stride
+                           + head_id * k_cache_h_stride
+                           + offs_d[None, :] * k_cache_d_stride,
+                           mask=mask_k[:, None], other=0.0)
 
         scores = tl.reshape(tl.dot(q, tl.trans(k_loaded)), (BLOCK_K,)) * SCALE
+        scores = tl.where(mask_k, scores, -float("inf"))
 
         block_max = tl.max(scores)
         new_max = tl.maximum(m, block_max)
         alpha = tl.exp(m - new_max)
         p = tl.exp(scores - new_max)
 
-        v_loaded = tl.load(
-            v_cache_ptr + offs_k[:, None] * k_cache_t_stride
-                         + head_id * k_cache_h_stride
-                         + offs_d[None, :] * k_cache_d_stride,
-            mask=mask_k[:, None], other=0.0,
-        )
+        v_loaded = tl.load(v_cache_ptr + offs_k[:, None] * k_cache_t_stride
+                           + head_id * k_cache_h_stride
+                           + offs_d[None, :] * k_cache_d_stride,
+                           mask=mask_k[:, None], other=0.0)
+
         acc = acc * alpha + tl.reshape(tl.dot(p[None, :], v_loaded), (D,))
         l = l * alpha + tl.sum(p)
         m = new_max
@@ -182,7 +171,6 @@ def traditional_decode_kernel(
     mid_o = acc / l
     tl.store(mid_o_ptr + group_id * mid_o_g_stride + chunk_id * mid_o_c_stride + offs_d * mid_o_d_stride, mid_o)
     tl.store(mid_logsumexp_ptr + group_id * mid_logsumexp_g_stride + chunk_id * mid_logsumexp_c_stride, m + tl.log(l))
-
 
 @triton.jit
 def reduce_kernel_traditional(
