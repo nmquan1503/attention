@@ -1,23 +1,18 @@
 import torch
 import triton
 import math
-
-from .forward_kernel import (
-    traditional_attention_kernel,
-    pack_sequences_kernel,
-    unpack_sequences_kernel,
-)
+from .forward_kernel import traditional_attention_kernel, pack_sequences_kernel, unpack_sequences_kernel
 
 
-def _traditional_attn(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+def varlen_traditional_attention_forward(
+    q: torch.Tensor,                # (total_tokens, num_heads, dim)
+    k: torch.Tensor,                # (total_tokens, num_heads, dim)
+    v: torch.Tensor,                # (total_tokens, num_heads, dim)
+    cu_seqlens: torch.Tensor,       # (num_seqs + 1,)
     max_seqlen: int,
     scale: float,
-    is_causal: bool,
-) -> torch.Tensor:
+    is_causal: bool = True,
+) -> torch.Tensor:                  # (total_tokens, num_heads, dim)
     """
     Args:
         q: (total_tokens, num_heads, dim)
@@ -27,6 +22,7 @@ def _traditional_attn(
         max_seqlen: int
         scale: float
         is_causal: bool
+
     Returns:
         out: (total_tokens, num_heads, dim)
     """
@@ -34,13 +30,14 @@ def _traditional_attn(
     num_seqs = cu_seqlens.numel() - 1
     num_groups = num_seqs * num_heads
 
-    out = torch.empty_like(q)
+    avg_q_len = total_tokens // num_seqs
+    avg_k_len = avg_q_len
 
     SMEM_BUDGET = 32 * 1024
     MIN_BLOCK_Q = 8
     MIN_BLOCK_K = 16
-    MAX_BLOCK_Q = min(128, triton.next_power_of_2(max_seqlen))
-    MAX_BLOCK_K = min(128, triton.next_power_of_2(max_seqlen))
+    MAX_BLOCK_Q = min(128, triton.next_power_of_2(avg_q_len))
+    MAX_BLOCK_K = min(128, triton.next_power_of_2(avg_k_len))
 
     dtype_size = q.element_size()
     smem_elems = SMEM_BUDGET // dtype_size
@@ -72,15 +69,13 @@ def _traditional_attn(
             BLOCK_K <<= 1
         num_programs = num_groups * math.ceil(max_seqlen / BLOCK_Q)
 
+    out = torch.empty_like(q)
     grid = (num_seqs, num_heads, triton.cdiv(max_seqlen, BLOCK_Q))
 
     traditional_attention_kernel[grid](
         q, k, v, out,
         cu_seqlens,
-        *q.stride(),
-        *k.stride(),
-        *v.stride(),
-        *out.stride(),
+        *q.stride(), *k.stride(), *v.stride(), *out.stride(),
         NUM_HEADS=num_heads,
         IS_CAUSAL=is_causal,
         SCALE=scale,
@@ -91,38 +86,15 @@ def _traditional_attn(
     return out
 
 
-def varlen_traditional_attention_forward(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: int,
-    scale: float,
-    is_causal: bool = True,
-) -> torch.Tensor:
-    """
-    Args:
-        q: (total_tokens, num_heads, dim)
-        k: (total_tokens, num_heads, dim)
-        v: (total_tokens, num_heads, dim)
-        cu_seqlens: (num_seqs + 1,)
-        max_seqlen: int
-        scale: float
-        is_causal: bool
-    Returns:
-        out: (total_tokens, num_heads, dim)
-    """
-    return _traditional_attn(q, k, v, cu_seqlens, max_seqlen, scale, is_causal)
-
-
 def pack_sequences(
-    x: torch.Tensor,
-    lengths: torch.Tensor,
+    x: torch.Tensor,        # (batch_size, seq_len, dim)
+    lengths: torch.Tensor,  # (batch_size,)
 ):
     """
     Args:
         x: (batch_size, seq_len, dim)
         lengths: (batch_size,)
+
     Returns:
         packed: (total_tokens, dim)
         cu_seqlens: (batch_size + 1,)
@@ -143,7 +115,6 @@ def pack_sequences(
     pack_offsets = torch.zeros(batch_size + 1, dtype=torch.int32, device=x.device)
     pack_offsets[1:] = num_token_blocks.cumsum(0)
     total_blocks = pack_offsets[-1].item()
-
     packed = torch.empty(total_tokens, dim, dtype=x.dtype, device=x.device)
 
     grid = lambda META: (
@@ -160,18 +131,18 @@ def pack_sequences(
         D=dim,
         BLOCK_T=block_t,
     )
-
     return packed, cu_seqlens
 
 
 def unpack_sequences(
-    packed: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    packed: torch.Tensor,       # (total_tokens, dim)
+    cu_seqlens: torch.Tensor,   # (batch_size + 1,)
 ):
     """
     Args:
         packed: (total_tokens, dim)
         cu_seqlens: (batch_size + 1,)
+
     Returns:
         x: (batch_size, max_seq_len, dim)
     """
@@ -217,5 +188,4 @@ def unpack_sequences(
         D=dim,
         BLOCK_T=block_t,
     )
-
     return x

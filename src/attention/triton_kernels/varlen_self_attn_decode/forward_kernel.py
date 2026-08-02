@@ -120,7 +120,7 @@ def traditional_decode_kernel(
     offs_d = tl.arange(0, D)
     q = tl.load(q_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
 
-    if is_last_chunk:
+    if is_last_chunk and current_len % CHUNK_SIZE != 0:
         new_pos = current_end
         k_new = tl.load(k_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)
         v_new = tl.load(v_ptr + seq_id * q_t_stride + head_id * q_h_stride + offs_d * q_d_stride)

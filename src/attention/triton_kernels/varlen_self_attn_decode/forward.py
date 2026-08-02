@@ -1,19 +1,17 @@
 import torch
-import triton
 import math
-
+import triton
 from .forward_kernel import (
-    pad_buffer_kernel,
     traditional_decode_kernel,
     reduce_kernel_traditional,
+    pad_buffer_kernel
 )
 
-
 def pad_buffer(
-    k_cache: torch.Tensor,            # (total_slots, num_heads, dim)
+    k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    cu_seqlens_cache: torch.Tensor,   # (num_seqs + 1,)
-    write_pos: torch.Tensor,          # (num_seqs,)
+    cu_seqlens_cache: torch.Tensor,
+    write_pos: torch.Tensor,
     buffer_size: int,
 ):
     """
@@ -23,6 +21,7 @@ def pad_buffer(
         cu_seqlens_cache: (num_seqs + 1,)
         write_pos: (num_seqs,)
         buffer_size: int
+
     Returns:
         k_out: (new_total_slots, num_heads, dim)
         v_out: (new_total_slots, num_heads, dim)
@@ -33,7 +32,7 @@ def pad_buffer(
     _, num_heads, dim = k_cache.shape
     lengths = write_pos - cu_seqlens_cache[:-1]
 
-    avg_len = math.ceil(lengths[lengths > 0].float().mean().item())
+    avg_len = math.ceil(lengths.float().mean().item())
     block_t = min(256, triton.next_power_of_2(avg_len))
 
     num_blocks_per_seq = triton.cdiv(lengths, block_t)
@@ -92,6 +91,7 @@ def varlen_traditional_attention_decode(
         v_cache: (total_slots, num_heads, dim)
         cu_seqlens_cache: (num_seqs + 1,)
         write_pos: (num_seqs,)
+
     Returns:
         out: (num_seqs, num_heads, dim)
         k_cache: (total_slots, num_heads, dim)
@@ -121,7 +121,6 @@ def varlen_traditional_attention_decode(
     max_block_k = (SMEM_BUDGET // dtype_size - 2 * dim) // (dim + 2)
     max_block_k = max(1, max_block_k)
     max_block_k = 1 << (max_block_k.bit_length() - 1)
-
     BLOCK_K = min(MAX_BLOCK_K, chunk_size, max_block_k)
     BLOCK_K = max(MIN_BLOCK_K, BLOCK_K)
 
