@@ -21,7 +21,7 @@ class MHA(nn.Module):
         is_causal=False, 
         selective=False, 
         forget=False,
-        fast: bool = True,
+        fast: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
